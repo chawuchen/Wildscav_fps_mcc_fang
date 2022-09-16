@@ -5,7 +5,7 @@ from gym import spaces
 from inspirai_fps.utils import get_distance, get_position
 from inspirai_fps.gamecore import Game, ActionVariable
 import random
-from RL_simple.backup.utils import get_pitch_yaw
+from utils import get_pitch_yaw
 
 BASE_WORKER_PORT = 50000
 DEPTH_MAP_FAR = 200
@@ -288,6 +288,7 @@ class NavigationBaseEnv(BaseEnv):
         action_cmd = true_action
         self.game.make_action({0: action_cmd})
         self.state = self.game.get_state()
+        self.obstacles_on_eyes(self.state)
         self.old_pos = self.pos
         self.pos = [self.state.position_x, self.state.position_y, self.state.position_z]
         last_direction = [v2 - v1 for v1, v2 in zip(self.old_pos, self.pos)]
@@ -343,6 +344,34 @@ class NavigationBaseEnv(BaseEnv):
     def _action_process(self, action):
         raise NotImplementedError()
 
+    def obstacles_on_eyes(self, state):
+        """Define a simple navigation policy"""
+        depth = state.depth_map[DEPTH_MAP_HEIGHT // 2 - 2:DEPTH_MAP_HEIGHT // 2 + 2, :]
+        analyse = []
+        for i in range(DEPTH_MAP_WIDTH):
+            if max(depth[:, i]) - min(depth[:, i]) < 0.05 and depth[3][i] < MAX_FAR:
+                analyse.append(
+                    [i - (DEPTH_MAP_WIDTH - 1) / 2, DEPTH_MAP_HEIGHT // 2 - (DEPTH_MAP_HEIGHT - 1) / 2, depth[3][i]])
+        if len(analyse) == 0:
+            return 0
+        analyse = np.array(analyse)
+        map_x_pos = analyse[:, 0].flatten()
+        map_y_pos = analyse[:, 1].flatten()
+        flatten_dmap = analyse[:, 2].flatten()
+        map_x_pos = np.multiply(map_x_pos, flatten_dmap) / FX
+        map_y_pos = np.multiply(map_y_pos, flatten_dmap) / - FX
+        x_d_y_cam = np.array([map_x_pos, flatten_dmap, map_y_pos, np.full(np.shape(map_y_pos), 1)])
+        pos_x, pos_y, pos_z = self.pos
+        camera_yaw = state.yaw / 180 * math.pi
+
+        transformation_matrix = np.array([[math.cos(camera_yaw), math.sin(camera_yaw), 0, pos_x],
+                                          [-math.sin(camera_yaw), math.cos(camera_yaw), 0, pos_z],
+                                          [0, 0, 1, pos_y + CAMERA_HEIGHT]])
+        point_cloud = np.dot(transformation_matrix, x_d_y_cam).transpose()
+
+        for i in range(point_cloud.shape[0]):
+            self.map2d[int(point_cloud[i][0])][int(point_cloud[i][1])] = 1
+        return 0
 
 class NavigationEnvSimple(NavigationBaseEnv):
     def __init__(self, config):
@@ -382,7 +411,7 @@ class NavigationEnvSimple(NavigationBaseEnv):
         if moved * math.cos((self.last_walk_dir - get_pitch_yaw(*change)[1]) / 180 * math.pi) <= (
         0.3 if self.pos[1] > -4 else 0.2):
             walk_obstacle = 1
-        feature_ex = np.append(np.array([walk_obstacle] + self.last_walk_idx), see_obstacle)
+        feature_ex = np.append(map2d, np.array(self.last_walk_idx))
         return feature_ex
 
     def _action_process(self, action):
@@ -399,31 +428,4 @@ class NavigationEnvSimple(NavigationBaseEnv):
         z = self.target_location[2] + dz
         return [x, self.start_hight, z]
 
-    def obstacles_on_eyes(self, state):
-        """Define a simple navigation policy"""
-        depth = state.depth_map[DEPTH_MAP_HEIGHT // 2 - 2:DEPTH_MAP_HEIGHT // 2 + 2, :]
-        analyse = []
-        for i in range(DEPTH_MAP_WIDTH):
-            if max(depth[:, i]) - min(depth[:, i]) < 0.05 and depth[3][i] < MAX_FAR:
-                analyse.append(
-                    [i - (DEPTH_MAP_WIDTH - 1) / 2, DEPTH_MAP_HEIGHT // 2 - (DEPTH_MAP_HEIGHT - 1) / 2, depth[3][i]])
-        if len(analyse) == 0:
-            return 0
-        analyse = np.array(analyse)
-        map_x_pos = analyse[:, 0].flatten()
-        map_y_pos = analyse[:, 1].flatten()
-        flatten_dmap = analyse[:, 2].flatten()
-        map_x_pos = np.multiply(map_x_pos, flatten_dmap) / FX
-        map_y_pos = np.multiply(map_y_pos, flatten_dmap) / - FX
-        x_d_y_cam = np.array([map_x_pos, flatten_dmap, map_y_pos, np.full(np.shape(map_y_pos), 1)])
-        pos_x, pos_y, pos_z = self.pos
-        camera_yaw = state.yaw / 180 * math.pi
 
-        transformation_matrix = np.array([[math.cos(camera_yaw), math.sin(camera_yaw), 0, pos_x],
-                                          [-math.sin(camera_yaw), math.cos(camera_yaw), 0, pos_z],
-                                          [0, 0, 1, pos_y + CAMERA_HEIGHT]])
-        point_cloud = np.dot(transformation_matrix, x_d_y_cam).transpose()
-
-        for i in range(point_cloud.shape[0]):
-            self.map2d[int(point_cloud[i][0])][int(point_cloud[i][1])] = 1
-        return 0
